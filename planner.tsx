@@ -743,6 +743,7 @@ function SupplyChainPlanner(): React.ReactElement {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [vPos, setVPos] = useState<VirtualPO[]>([]);
   const [initialVpoIds, setInitialVpoIds] = useState<Set<string>>(new Set());
+  const [includeOtherMoNeed, setIncludeOtherMoNeed] = useState(false);
   const [planDropdownOpen, setPlanDropdownOpen] = useState(false);
   const [newPlanName, setNewPlanName] = useState("");
   const [isSaving, setIsSaving] = useState(false);
@@ -938,9 +939,46 @@ function SupplyChainPlanner(): React.ReactElement {
     });
     return map;
   }, [moPickRecords, moRecords, moPickStillToPickField, moPickMaterialField, moPickMoField, moStatusFieldProp, moDueDateField, moSoHeadersField, salesOrderHeaders]);
+  const selectedOrderIdSet = useMemo(() => new Set(visibleSalesOrders.map(so => so.id)), [visibleSalesOrders]);
+
+  // MO unpicked belonging to SELECTED SOs only
+  const selectedOnlyStillToPickByMaterialDate = useMemo(() => {
+    const map = new Map<string, Map<string, number>>();
+    if (!moPickStillToPickField || !moPickMaterialField || !moPickMoField || !moSoHeadersField) return map;
+    const moById = new Map(moRecords.map(r => [r.id, r] as [string, typeof r]));
+    const soDateById = new Map(salesOrderHeaders.map(so => [so.id, so.date] as [string, string]));
+    moPickRecords.forEach(line => {
+      const stp = line.getCellValue(moPickStillToPickField.id);
+      if (typeof stp !== 'number' || stp <= 0) return;
+      const mLinks = (line.getCellValue(moPickMaterialField.id) as any[]) || [];
+      if (!mLinks.length) return;
+      const moLinks = (line.getCellValue(moPickMoField.id) as any[]) || [];
+      const mo = moLinks.length ? moById.get(moLinks[0].id) : null;
+      if (!mo) return;
+      if (moStatusFieldProp) {
+        const st = (mo.getCellValueAsString(moStatusFieldProp.id) || '').toLowerCase().trim();
+        if (st !== 'created' && st !== 'released') return;
+      }
+      const soLinks = (mo.getCellValue(moSoHeadersField.id) as any[]) || [];
+      if (!soLinks.some(l => selectedOrderIdSet.has(l.id))) return; // foreign MO -> excluded here
+      let date = '';
+      const soDates = soLinks.map(l => soDateById.get(l.id)).filter((d): d is string => !!d).sort();
+      if (soDates.length) date = soDates[0];
+      if (!date && moDueDateField) date = parseStrictDate(mo.getCellValue(moDueDateField.id));
+      if (!date) return;
+      const matId = mLinks[0].id;
+      if (!map.has(matId)) map.set(matId, new Map());
+      const dm = map.get(matId)!;
+      dm.set(date, (dm.get(date) ?? 0) + stp);
+    });
+    return map;
+  }, [moPickRecords, moRecords, moPickStillToPickField, moPickMaterialField, moPickMoField, moStatusFieldProp, moDueDateField, moSoHeadersField, salesOrderHeaders, selectedOrderIdSet]);
+
+  // What pills, Bal, and the sandbox waterfall actually use (All always uses the full map)
+  const effectiveMoNeedByMaterialDate = includeOtherMoNeed ? stillToPickByMaterialDate : selectedOnlyStillToPickByMaterialDate;
   // Per-date MO detail for the demand popup: which MO still needs how much, for which SO(s)
   const stillToPickDetailByMaterialDate = useMemo(() => {
-    const map = new Map<string, Map<string, { moRecId: string; moName: string; soLabel: string; qty: number }[]>>();
+    const map = new Map<string, Map<string, { moRecId: string; moName: string; soLabel: string; qty: number; isSelected: boolean }[]>>();
     if (!moPickStillToPickField || !moPickMaterialField || !moPickMoField) return map;
     const moById = new Map(moRecords.map(r => [r.id, r] as [string, typeof r]));
     const soDateById = new Map(salesOrderHeaders.map(so => [so.id, so.date] as [string, string]));
@@ -960,7 +998,7 @@ function SupplyChainPlanner(): React.ReactElement {
       let soLabel = '';
       if (moSoHeadersField) {
         const soLinks = (mo.getCellValue(moSoHeadersField.id) as any[]) || [];
-        soLabel = soLinks.map(l => l?.name).filter(Boolean).join(', ');
+        var isSelCard = soLinks.some(l => selectedOrderIdSet.has(l.id));
         const soDates = soLinks.map(l => soDateById.get(l.id)).filter((d): d is string => !!d).sort();
         if (soDates.length) date = soDates[0];
       }
@@ -973,10 +1011,10 @@ function SupplyChainPlanner(): React.ReactElement {
       const arr = dm.get(date)!;
       const existing = arr.find(x => x.moRecId === mo.id);
       if (existing) existing.qty += stp;
-      else arr.push({ moRecId: mo.id, moName: mo.name || 'MO', soLabel, qty: stp });
+      else arr.push({ moRecId: mo.id, moName: mo.name || 'MO', soLabel, qty: stp, isSelected: typeof isSelCard !== 'undefined' ? isSelCard : false });
     });
     return map;
-  }, [moPickRecords, moRecords, moPickStillToPickField, moPickMaterialField, moPickMoField, moStatusFieldProp, moDueDateField, moSoHeadersField, salesOrderHeaders]);
+  }, [moPickRecords, moRecords, moPickStillToPickField, moPickMaterialField, moPickMoField, moStatusFieldProp, moDueDateField, moSoHeadersField, salesOrderHeaders, selectedOrderIdSet]);
   const allDates = useMemo(() => {
     const d = new Set<string>();
     salesOrderHeaders.forEach(so => so.date && d.add(so.date));
@@ -1087,14 +1125,14 @@ function SupplyChainPlanner(): React.ReactElement {
       vPos.filter(vpo => vpo.materialId === materialId && vpo.date === date).forEach(vpo => incoming += vpo.qty);
       // Pick-aware outgoing: unreleased SO need on its date + MO unpicked on its SO's date
       const soNeedOut = (useAllOrders ? realUnreleasedSODemandByMaterialDate : unreleasedSODemandByMaterialDate).get(materialId)?.get(date) ?? 0;
-      const moNeedOut = stillToPickByMaterialDate.get(materialId)?.get(date) ?? 0;
+      const moNeedOut = (useAllOrders ? stillToPickByMaterialDate : effectiveMoNeedByMaterialDate).get(materialId)?.get(date) ?? 0;
       const outgoing = soNeedOut + moNeedOut;
       const timePhasedDemand = outgoing;
       balance = balance + incoming - outgoing;
       result.set(date, { balance, incoming, outgoing, timePhasedDemand });
     });
     return result;
-  }, [allDates, purchaseOrders, vPos, unreleasedSODemandByMaterialDate, realUnreleasedSODemandByMaterialDate, stillToPickByMaterialDate, totalCommittedSandboxByMaterial, totalCommittedRealWorldByMaterial, materials]);
+  }, [allDates, purchaseOrders, vPos, unreleasedSODemandByMaterialDate, realUnreleasedSODemandByMaterialDate, stillToPickByMaterialDate, effectiveMoNeedByMaterialDate, totalCommittedSandboxByMaterial, totalCommittedRealWorldByMaterial, materials]);
 
   const selectedFilterKit = useMemo(() => kits.find(k => k.id === kitFilter) ?? null, [kits, kitFilter]);
 
@@ -1177,7 +1215,8 @@ function SupplyChainPlanner(): React.ReactElement {
   const moMapsForDisplay = useMemo(() => {
     const selected = new Map<string, Map<string, number>>();
     const requiredAll = new Map<string, Map<string, number>>();
-    if (!moPickMaterialField || !moPickMoField) return { selected, requiredAll };
+    const requiredSelected = new Map<string, Map<string, number>>();
+    if (!moPickMaterialField || !moPickMoField) return { selected, requiredAll, requiredSelected };
     const selectedIds = new Set(visibleSalesOrders.map(so => so.id));
     const moById = new Map(moRecords.map(r => [r.id, r] as [string, typeof r]));
     const soDateById = new Map(salesOrderHeaders.map(so => [so.id, so.date] as [string, string]));
@@ -1213,9 +1252,14 @@ function SupplyChainPlanner(): React.ReactElement {
         if (!requiredAll.has(matId)) requiredAll.set(matId, new Map());
         const dm = requiredAll.get(matId)!;
         dm.set(date, (dm.get(date) ?? 0) + req);
+        if (isSelected) {
+          if (!requiredSelected.has(matId)) requiredSelected.set(matId, new Map());
+          const dms = requiredSelected.get(matId)!;
+          dms.set(date, (dms.get(date) ?? 0) + req);
+        }
       }
     });
-    return { selected, requiredAll };
+    return { selected, requiredAll, requiredSelected };
   }, [moPickRecords, moRecords, moPickMaterialField, moPickMoField, moPickStillToPickField, moPickQtyField, moStatusFieldProp, moDueDateField, moSoHeadersField, salesOrderHeaders, visibleSalesOrders]);
 
   // Helper function to calculate unreleased SO demand for a given list of sales orders
@@ -1234,14 +1278,14 @@ function SupplyChainPlanner(): React.ReactElement {
         purchaseOrders.filter(po => po.materialId === m.id && po.date === date).forEach(po => { incoming += po.qty; });
         vPos.filter(vpo => vpo.materialId === m.id && vpo.date === date).forEach(vpo => { incoming += vpo.qty; });
         const so = selNeed.get(m.id)?.get(date) ?? 0;
-        const mo = moMapsForDisplay.selected.get(m.id)?.get(date) ?? 0;
+        const mo = effectiveMoNeedByMaterialDate.get(m.id)?.get(date) ?? 0;
         bal = bal + incoming - so - mo;
         dm.set(date, bal);
       });
       map.set(m.id, dm);
     });
     return map;
-  }, [materials, allDates, buildUnreleasedDemandDated, visibleSalesOrders, moMapsForDisplay, purchaseOrders, vPos]);
+  }, [materials, allDates, buildUnreleasedDemandDated, visibleSalesOrders, effectiveMoNeedByMaterialDate, purchaseOrders, vPos]);
   // materialId -> (SO date -> qty). ONLY demand with no MO yet.
   // Kit lines allocated to an MO (or status "Released MO") hand their products'
   // material demand to the picklist — that remainder lives in Still To Pick.
@@ -1314,11 +1358,11 @@ function SupplyChainPlanner(): React.ReactElement {
   const activeDates = useMemo(() => {
     return allDates.filter(date => {
       const fga = productIds.some(pid => { const b = computeFGBuckets(pid, date); return b.committedReady>0 || b.committedShort>0 || b.atpReady>0 || b.late>0 || b.short>0; });
-      const rma = materialIds.some(mId => { const w = allSandboxWaterfalls.get(mId); const need = (unreleasedSODemandByMaterialDate.get(mId)?.get(date) ?? 0) + (stillToPickByMaterialDate.get(mId)?.get(date) ?? 0); return need > 0 || (w && w.get(date) && (w.get(date)!.incoming>0 || w.get(date)!.outgoing>0)); });
+      const rma = materialIds.some(mId => { const w = allSandboxWaterfalls.get(mId); const need = (unreleasedSODemandByMaterialDate.get(mId)?.get(date) ?? 0) + (effectiveMoNeedByMaterialDate.get(mId)?.get(date) ?? 0); return need > 0 || (w && w.get(date) && (w.get(date)!.incoming>0 || w.get(date)!.outgoing>0)); });
       const kda = visibleKits.some(k => (kitDemandMap.get(k.id)?.byDate.get(date) ?? 0) > 0);
       return fga || rma || kda;
     });
-  }, [allDates, productIds, materialIds, computeFGBuckets, allSandboxWaterfalls, visibleKits, kitDemandMap, unreleasedSODemandByMaterialDate, stillToPickByMaterialDate]);
+  }, [allDates, productIds, materialIds, computeFGBuckets, allSandboxWaterfalls, visibleKits, kitDemandMap, unreleasedSODemandByMaterialDate, effectiveMoNeedByMaterialDate]);
 
   const handlePillClick = useCallback((e: React.MouseEvent, content: React.ReactNode) => {
     e.stopPropagation();
@@ -2464,6 +2508,13 @@ function SupplyChainPlanner(): React.ReactElement {
                 <div className="flex items-center gap-2">
                   <PackageIcon weight="duotone" className="w-5 h-5 text-emerald-500" />
                   <span className="font-semibold text-sm">Raw Materials / BOM Plan</span>
+                  <button onClick={(e) => { e.stopPropagation(); setIncludeOtherMoNeed(v => !v); }}
+  className={`ml-3 px-2 py-1 rounded-lg text-[11px] font-bold border transition-colors ${includeOtherMoNeed
+    ? 'bg-indigo-100 text-indigo-700 border-indigo-300 dark:bg-indigo-900/40 dark:text-indigo-300 dark:border-indigo-700'
+    : (isDark ? 'bg-gray-700 text-gray-300 border-gray-600' : 'bg-gray-100 text-gray-600 border-gray-300')}`}
+  title="Include unpicked MOs not linked to the selected orders. Affects pills and Bal — All always includes everything.">
+  {includeOtherMoNeed ? 'Other MOs: shown' : 'Other MOs: hidden'}
+</button>
                 </div>
                 <CaretRightIcon className={`w-4 h-4 transition-transform ${showRM ? 'rotate-90' : ''}`} />
               </div>
@@ -2556,12 +2607,12 @@ function SupplyChainPlanner(): React.ReactElement {
                               const data = sandboxWaterfall?.get(date);
                               const rwData = rwWaterfall?.get(date);
                               const soNeed = unreleasedSODemandByMaterialDate.get(matId)?.get(date) ?? 0;
-                              const moNeed = stillToPickByMaterialDate.get(matId)?.get(date) ?? 0;
+                              const moNeed = effectiveMoNeedByMaterialDate.get(matId)?.get(date) ?? 0;
                               const totNeed = soNeed + moNeed;
                               const needLabel = soNeed > 0 && moNeed > 0
                                 ? `SO ${Math.round(soNeed).toLocaleString()} + MO ${Math.round(moNeed).toLocaleString()}`
                                 : soNeed > 0 ? `SO ${Math.round(soNeed).toLocaleString()}` : `MO ${Math.round(moNeed).toLocaleString()}`;
-                              const moRequiredHere = moMapsForDisplay.requiredAll.get(matId)?.get(date) ?? 0;
+                              const moRequiredHere = (includeOtherMoNeed ? moMapsForDisplay.requiredAll : moMapsForDisplay.requiredSelected).get(matId)?.get(date) ?? 0;
                               const fullyPickedHere = totNeed <= 0 && moRequiredHere > 0;
                               if (!data) return <td key={date} className={`px-2 py-2 border-l ${borderColor}`}></td>;
                               if (data.incoming === 0 && data.timePhasedDemand === 0 && totNeed <= 0 && !fullyPickedHere) return <td key={date} className={`px-2 py-2 border-l ${borderColor}`}></td>;
@@ -2653,7 +2704,7 @@ function SupplyChainPlanner(): React.ReactElement {
                                                     </button>
                                                   );
                                                 })}
-                                                {(stillToPickDetailByMaterialDate.get(matId)?.get(date) ?? []).map((moItem) => (
+                                                {(stillToPickDetailByMaterialDate.get(matId)?.get(date) ?? []).filter(mi => includeOtherMoNeed || mi.isSelected).map((moItem) => (
                                                   <button
                                                     onClick={(ev) => { ev.preventDefault(); ev.stopPropagation(); const rec = moRecords.find(r => r.id === moItem.moRecId); if (rec) expandRecord(rec); }}
                                                     key={moItem.moRecId}
