@@ -8,7 +8,7 @@ import {
 } from "@phosphor-icons/react";
 
 // --- TYPES ---
-type Material = { id: string; name: string; onHand: number; category: string; orderedStr: string; stillToPick: number; };
+type Material = { id: string; name: string; onHand: number; category: string; orderedStr: string; stillToPick: number; stockLocQty: number; transitQty: number; };
 type Product = { id: string; name: string; };
 type Kit = { id: string; name: string; productIds: string[]; items: { productId: string; qty: number }[]; };
 // id and moQtyPer added: id lets us match back to bomRecords, moQtyPer is the no-overage qty used only for MO picklist
@@ -71,6 +71,8 @@ function getCustomProperties(base: ReturnType<typeof useBase>) {
     { key: 'materialsCategoryField', label: 'Category', type: 'field' as const, table: materialsTable ?? base.tables[0]!, shouldFieldBeAllowed: () => true, defaultValue: materialsTable?.fields.find(f => f.name.toLowerCase().includes('category')) },
     { key: 'orderedField', label: 'Ordered', type: 'field' as const, table: materialsTable ?? base.tables[0]!, shouldFieldBeAllowed: () => true, defaultValue: materialsTable?.fields.find(f => f.name.toLowerCase().includes('order')) },
     { key: 'materialsStillToPickField', label: 'Still To Pick (Open MOs)', type: 'field' as const, table: materialsTable ?? base.tables[0]!, shouldFieldBeAllowed: () => true, defaultValue: materialsTable?.fields.find(f => f.name === 'Still To Pick (Open MOs)') },
+    { key: 'materialsStockLocField', label: 'Qty @ Stock Location', type: 'field' as const, table: materialsTable ?? base.tables[0]!, shouldFieldBeAllowed: () => true, defaultValue: materialsTable?.fields.find(f => f.name === 'Qty @ Stock Location') },
+    { key: 'materialsInTransitField', label: 'Qty In Transit', type: 'field' as const, table: materialsTable ?? base.tables[0]!, shouldFieldBeAllowed: () => true, defaultValue: materialsTable?.fields.find(f => f.name === 'Qty In Transit') },
     
     { key: 'productsTable', label: 'Products Table', type: 'table' as const, defaultValue: productsTable },
     { key: 'productsNameField', label: 'Product Name', type: 'field' as const, table: productsTable ?? base.tables[0]!, shouldFieldBeAllowed: () => true, defaultValue: productsTable?.fields.find(f => f.type === 'singleLineText' || f.type === 'multilineText') },
@@ -258,6 +260,8 @@ function SupplyChainPlanner(): React.ReactElement {
   const materialsCategoryField = props.materialsCategoryField as Field | undefined;
   const orderedField = props.orderedField as Field | undefined;
   const materialsStillToPickField = props.materialsStillToPickField as Field | undefined;
+  const materialsStockLocField = props.materialsStockLocField as Field | undefined;
+  const materialsInTransitField = props.materialsInTransitField as Field | undefined;
   
   const productsTable = props.productsTable as Table | undefined;
   const productsNameField = props.productsNameField as Field | undefined;
@@ -420,9 +424,15 @@ function SupplyChainPlanner(): React.ReactElement {
       let stillToPick = 0; const rawStp = getVal(r, materialsStillToPickField);
       if (typeof rawStp === 'number') stillToPick = rawStp;
       if (Array.isArray(rawStp) && typeof rawStp[0] === 'number') stillToPick = rawStp[0];
-      return { id: r.id, name: getStr(r, materialsNameField), onHand, category: cat?.name ?? 'Uncategorized', orderedStr, stillToPick };
+      let stockLocQty = 0; const rawStock = getVal(r, materialsStockLocField);
+      if (typeof rawStock === 'number') stockLocQty = rawStock;
+      if (Array.isArray(rawStock) && typeof rawStock[0] === 'number') stockLocQty = rawStock[0];
+      let transitQty = 0; const rawTransit = getVal(r, materialsInTransitField);
+      if (typeof rawTransit === 'number') transitQty = rawTransit;
+      if (Array.isArray(rawTransit) && typeof rawTransit[0] === 'number') transitQty = rawTransit[0];
+      return { id: r.id, name: getStr(r, materialsNameField), onHand, category: cat?.name ?? 'Uncategorized', orderedStr, stillToPick, stockLocQty, transitQty };
     });
-  }, [materialsRecords, materialsNameField, materialsOnHandField, materialsCategoryField, orderedField, materialsStillToPickField]);
+  }, [materialsRecords, materialsNameField, materialsOnHandField, materialsCategoryField, orderedField, materialsStillToPickField, materialsStockLocField, materialsInTransitField]);
 
   const products = useMemo((): Product[] => {
     return productsRecords.map((r) => ({ id: r.id, name: getStr(r, productsNameField) }));
@@ -2526,7 +2536,7 @@ function SupplyChainPlanner(): React.ReactElement {
                       <tr>
                         <th className={`px-3 py-2 text-left min-w-[200px] max-w-[200px] w-[200px] sticky left-0 z-20 ${theadBg} border-r ${borderColor}`}>Material</th>
                         <th className={`px-3 py-2 text-center min-w-[120px] max-w-[120px] w-[120px] sticky left-[200px] z-20 ${theadBg} border-r ${borderColor}`}>Ordered</th>
-                        <th className={`px-3 py-2 text-center min-w-[100px] max-w-[100px] w-[100px] sticky left-[320px] z-20 ${theadBg} border-r ${borderColor}`}>On Hand / Com.</th>
+                        <th className={`px-3 py-2 text-center min-w-[100px] max-w-[100px] w-[100px] sticky left-[320px] z-20 ${theadBg} border-r ${borderColor}`}>On Hand</th>
                         <th className={`px-3 py-2 text-center min-w-[80px] max-w-[80px] w-[80px] sticky left-[420px] z-20 ${theadBg} border-r ${borderColor} shadow-[2px_0_5px_-2px_rgba(0,0,0,0.1)]`}>Avail Now</th>
                         {activeDates.map((date) => (
                           <th key={date} className={`px-2 py-2 text-center min-w-[100px] border-l ${borderColor}`}>
@@ -2585,16 +2595,36 @@ function SupplyChainPlanner(): React.ReactElement {
                               </div>
                             </td>
                             <td className={`px-3 py-2 text-center min-w-[100px] max-w-[100px] w-[100px] sticky left-[320px] z-10 ${isDark?'bg-gray-700 group-hover:bg-gray-600':'bg-white group-hover:bg-gray-50'} border-r ${borderColor}`}>
-                              <div className="flex flex-col items-center justify-center gap-0.5 py-0.5">
-                                <span className="text-xs font-black tabular-nums text-slate-700 dark:text-slate-200 leading-none">{Math.round(material.onHand).toLocaleString()}</span>
-                                {committedQty > 0 ? (
-                                  <span className="inline-flex items-center gap-0.5 px-1 py-0 rounded bg-orange-100 text-orange-800 border border-orange-200 dark:bg-orange-900/50 dark:text-orange-400 dark:border-orange-800 text-[9px] font-bold tabular-nums mt-0.5">
-                                    <WarningIcon weight="bold" size={10} /> {Math.round(committedQty).toLocaleString()}
-                                  </span>
-                                ) : (
-                                  <span className={`text-[10px] ${isDark?'text-gray-500':'text-gray-300'}`}>-</span>
-                                )}
-                              </div>
+                              {(() => {
+                                const mainQty = material.onHand - (material.stockLocQty ?? 0) - (material.transitQty ?? 0);
+                                return (
+                                  <div className="flex flex-col items-center justify-center gap-0.5 py-0.5">
+                                    {Math.round(mainQty) !== 0 && (
+                                      <div className="flex items-center justify-between w-[95%] px-1" title="Pickable at the Main Location">
+                                        <span className={`text-[8px] font-bold uppercase tracking-wider ${isDark?'text-gray-400':'text-gray-500'}`}>Main</span>
+                                        <span className="text-xs font-black tabular-nums text-slate-700 dark:text-slate-200 leading-none">{Math.round(mainQty).toLocaleString()}</span>
+                                      </div>
+                                    )}
+                                    {(material.stockLocQty ?? 0) > 0 && (
+                                      <div className="flex items-center justify-between w-[95%] px-1" title="Stored at the Stock Location (needs transfer before picking)">
+                                        <span className={`text-[8px] font-bold uppercase tracking-wider ${isDark?'text-gray-400':'text-gray-500'}`}>Stock</span>
+                                        <span className={`text-[11px] font-bold tabular-nums ${isDark?'text-gray-300':'text-gray-600'} leading-none`}>{Math.round(material.stockLocQty).toLocaleString()}</span>
+                                      </div>
+                                    )}
+                                    {(material.transitQty ?? 0) > 0 && (
+                                      <div className="flex items-center justify-between w-[95%] px-1" title="In transit back to the Main Location (pickable nowhere yet)">
+                                        <span className={`text-[8px] font-bold uppercase tracking-wider italic ${isDark?'text-gray-500':'text-gray-400'}`}>Transit</span>
+                                        <span className={`text-[11px] font-bold tabular-nums italic ${isDark?'text-gray-400':'text-gray-500'} leading-none`}>{Math.round(material.transitQty).toLocaleString()}</span>
+                                      </div>
+                                    )}
+                                    {committedQty > 0 && (
+                                      <span className="inline-flex items-center gap-0.5 px-1 py-0 rounded bg-orange-100 text-orange-800 border border-orange-200 dark:bg-orange-900/50 dark:text-orange-400 dark:border-orange-800 text-[9px] font-bold tabular-nums mt-0.5">
+                                        <WarningIcon weight="bold" size={10} /> {Math.round(committedQty).toLocaleString()}
+                                      </span>
+                                    )}
+                                  </div>
+                                );
+                              })()}
                             </td>
                             <td className={`px-3 py-2 text-center min-w-[80px] max-w-[80px] w-[80px] sticky left-[420px] z-10 ${isDark?'bg-gray-700 group-hover:bg-gray-600':'bg-white group-hover:bg-gray-50'} border-r ${borderColor} shadow-[2px_0_5px_-2px_rgba(0,0,0,0.1)]`}>
                                {availNow >= 0 ? (
